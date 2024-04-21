@@ -655,7 +655,7 @@ impl HtmlInterpreter {
             TagName::TableHeader => {
                 let iter = self.state.element_iter_mut();
                 let table = iter.rev().find_map(|elem| elem.as_mut_table()).unwrap();
-                table.push_header(self.current_textbox.clone());
+                //table.push_header(self.current_textbox.clone());
                 self.current_textbox.texts.clear();
                 self.state.text_options.bold -= 1;
             }
@@ -735,8 +735,6 @@ impl HtmlInterpreter {
                 }
             }
             TagName::PreformattedText => {
-                self.push_current_textbox();
-                self.push_spacer();
                 self.state.text_options.pre_formatted -= 1;
                 self.current_textbox.set_code_block(false);
             }
