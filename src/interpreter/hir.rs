@@ -189,4 +189,3 @@ impl Default for Hir {
         Self::new()
     }
 }
-unsafe impl Send for Hir {}
