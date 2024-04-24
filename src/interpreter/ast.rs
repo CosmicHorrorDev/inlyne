@@ -12,8 +12,6 @@ use comrak::Anchorizer;
 use glyphon::FamilyOwned;
 use html5ever::tendril::{SliceExt, StrTendril};
 use lyon::geom::utils::tangent;
-use lyon::geom::utils::tangent;
-use std::cell::{Cell, Ref, RefCell};
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::VecDeque;
 use std::num::{NonZeroU8, NonZeroUsize};
@@ -133,6 +131,9 @@ impl Ast {
             }
             TagName::Div => {
                 self.push_text_box(inherited_state.clone());
+
+                Self::update_align(&mut inherited_state, &attributes);
+
                 self.process_content(inherited_state.clone(), content);
                 self.push_text_box(inherited_state);
             }
@@ -195,7 +196,11 @@ impl Ast {
                 self.push_text_box(inherited_state.clone());
                 self.push_spacer();
 
-                inherited_state.set_align(attributes.iter().find_map(|attr| attr.to_align()));
+                Self::update_align(&mut inherited_state, &attributes);
+                self.current_textbox
+                    .borrow_mut()
+                    .set_align_or_default(inherited_state.text_options.align);
+
                 inherited_state.text_options.bold = true;
                 self.current_textbox.borrow_mut().font_size *= header.size_multiplier();
 
@@ -563,7 +568,7 @@ impl Ast {
             |_| {},
             |node| {
                 let mut inherited_state = inherited_state.clone();
-                inherited_state.set_align(node.attributes.iter().find_map(|attr| attr.to_align()));
+                Self::update_align(&mut inherited_state, &node.attributes);
                 match node.tag {
                     TagName::TableHeader => self.process_table_header(table, inherited_state, node.content),
                     TagName::TableDataCell => self.process_table_cell(table, inherited_state, node.content),
@@ -590,6 +595,7 @@ impl Ast {
             content,
             |text| {
                 let mut tb = TextBox::new(vec![], self.hidpi_scale);
+                tb.set_align_or_default(inherited_state.text_options.align);
                 self.text(&mut tb, inherited_state.clone(), text);
                 row.push(tb);
             },
@@ -615,6 +621,7 @@ impl Ast {
             content,
             |text| {
                 let mut tb = TextBox::new(vec![], self.hidpi_scale);
+                tb.set_align_or_default(inherited_state.text_options.align);
                 self.text(&mut tb, inherited_state.clone(), text);
                 row.push(tb);
             },
@@ -688,5 +695,9 @@ impl Ast {
                 TextOrHirNode::Hir(node) => node_fn(unwrap_hir_node(node)),
             }
         }
+    }
+
+    fn update_align(state: &mut InheritedState, attributes: &Attributes) {
+        state.set_align(attributes.iter().find_map(|attr| attr.to_align()));
     }
 }
