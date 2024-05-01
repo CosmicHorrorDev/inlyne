@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::ops::DerefMut;
 use wgpu::TextureFormat;
@@ -58,10 +59,49 @@ impl InheritedState {
 
 type Content<'a> = &'a [TextOrHirNode];
 type Attributes<'a> = &'a [Attr];
-pub type Output<'a> = &'a mut Vec<Element>;
+//pub type Output<'a> = &'a mut Vec<Element>;
 pub type Input<'a> = &'a [HirNode];
 type State<'a> = Cow<'a, InheritedState>;
 type Opts<'a> = &'a AstOpts;
+
+trait OutputStream {
+    type Output;
+    fn push(&mut self, i: impl Into<Self::Output>);
+
+    fn map<F, O>(&mut self, f: F) -> Map<Self, F, O>
+    where
+        Self: Sized,
+    {
+        Map(self, f, PhantomData)
+    }
+}
+impl<T> OutputStream for Vec<T> {
+    type Output = T;
+    fn push(&mut self, i: impl Into<Self::Output>) {
+        self.push(i.into());
+    }
+}
+struct Map<'a, T: OutputStream, F, O>(&'a mut T, F, PhantomData<O>);
+impl<'a, T, F, O> OutputStream for Map<'a, T, F, O>
+where
+    T: OutputStream,
+    F: FnMut(O) -> T::Output,
+{
+    type Output = O;
+    fn push(&mut self, i: impl Into<Self::Output>) {
+        self.0.push(self.1(i.into()))
+    }
+}
+struct Dummy<T>(PhantomData<T>);
+impl<T> Dummy<T> {
+    const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<T> OutputStream for Dummy<T> {
+    type Output = T;
+    fn push(&mut self, i: impl Into<Self::Output>) {}
+}
 
 pub struct AstOpts {
     pub anchorizer: Mutex<Anchorizer>,
@@ -87,18 +127,15 @@ pub struct Ast {
     pub opts: AstOpts,
 }
 impl Ast {
-    pub fn new() -> Self {
-        Self {
-            opts: AstOpts::new(),
-        }
+    pub fn new(opts: AstOpts) -> Self {
+        Self { opts }
     }
     pub fn interpret(&self, hir: Hir) -> Vec<Element> {
         let nodes = hir.content();
         let root = nodes.first().unwrap().content.clone();
-        let mut state = State::Owned(InheritedState::with_span_color(
-            self.opts.native_color(self.opts.theme.code_color),
+        let state = State::Owned(InheritedState::with_span_color(
+            self.opts.native_color(self.opts.theme.text_color),
         ));
-
         root.into_iter()
             .filter_map(|ton| {
                 if let TextOrHirNode::Hir(node) = ton {
@@ -122,22 +159,26 @@ impl Ast {
     }
 }
 
+macro_rules! out {
+    () => {&mut impl OutputStream<Output=Element>};
+}
+
 trait Process {
     type Context<'a>;
     fn process(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'_>,
         node: &HirNode,
         state: State,
     );
-    fn process_content(
+    fn process_content<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'_>,
-        content: Content,
+        content: impl IntoIterator<Item = &'a TextOrHirNode>,
         state: State,
     ) {
         unimplemented!()
@@ -156,10 +197,10 @@ trait Process {
     fn get_node(input: Input, index: usize) -> &HirNode {
         input.get(index).unwrap()
     }
-    fn push_element<T: Into<Element>>(output: Output, element: T) {
+    fn push_element<T: Into<Element>>(output: out!(), element: T) {
         output.push(element.into())
     }
-    fn push_spacer(output: Output) {
+    fn push_spacer(output: out!()) {
         Self::push_element(output, Spacer::invisible())
     }
     fn text(text_box: &mut TextBox, mut string: &str, opts: Opts, mut state: State) {
@@ -265,7 +306,7 @@ trait Process {
             text_box.texts.push(text);
         }
     }
-    fn push_text_box(output: Output, text_box: &mut TextBox, opts: Opts, state: &State) {
+    fn push_text_box(output: out!(), text_box: &mut TextBox, opts: Opts, state: &State) {
         //if let Some((row, count)) = self.state.inline_images.take() {
         //    if count == 0 {
         //        self.push_element(row);
@@ -311,7 +352,7 @@ impl Process for FlowProcess {
     type Context<'a> = &'a mut TextBox;
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'a>,
         node: &HirNode,
@@ -427,16 +468,7 @@ impl Process for FlowProcess {
                 );
             }
             TagName::Details => {
-                //TODO
-                return;
-                //self.push_text_box(out, inherited_state);
-                //self.push_spacer(out);
-                //let section = Section::bare(self.opts.hidpi_scale);
-                //*section.hidden.borrow_mut() = true;
-                //todo!("Details Implementation");
-                //// handle_details(...)
-                //self.push_element(out, section);
-                return;
+                DetailsProcess::process(input, output, opts, (), node, state);
             }
             TagName::Summary => {
                 tracing::warn!("Summary can only be in an Details element");
@@ -649,12 +681,12 @@ impl Process for FlowProcess {
         }
     }
 
-    fn process_content(
+    fn process_content<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'_>,
-        content: Content,
+        content: impl IntoIterator<Item = &'a TextOrHirNode>,
         state: State,
     ) {
         for node in content {
@@ -676,43 +708,59 @@ impl Process for DetailsProcess {
     type Context<'a> = ();
     fn process(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
-        context: Self::Context<'_>,
+        _context: Self::Context<'_>,
         node: &HirNode,
         state: State,
     ) {
         let mut section = Section::bare(opts.hidpi_scale);
         *section.hidden.get_mut() = true;
 
-        let index = if let Some(first_child) = node.content.first() {
-            match first_child {
-                TextOrHirNode::Text(_) => 0,
-                TextOrHirNode::Hir(node) => {
-                    let node = Self::get_node(input, *node);
-                    if node.tag == TagName::Summary {
-                        section.1
-                    } else {
-                        0
-                    }
-                }
-            }
+        let mut content = node.content.iter();
+        let mut tb = TextBox::new(vec![], opts.hidpi_scale);
+
+        let Some(first) = node.content.first() else {
+            return;
         };
+        match first {
+            TextOrHirNode::Hir(index) if Self::get_node(input, *index).tag == TagName::Summary => {
+                content.next();
+
+                let summary = Self::get_node(input, *index);
+
+                FlowProcess::process_content(
+                    input,
+                    &mut Dummy::new(),
+                    opts,
+                    &mut tb,
+                    summary.content.iter(),
+                    state.clone(),
+                );
+
+                *section.summary = Some(Positioned::new(tb));
+            }
+            _ => {
+                let mut tb = TextBox::new(vec![], opts.hidpi_scale);
+                Self::text(&mut tb, "Details", opts, state.clone());
+                *section.summary = Some(Positioned::new(Element::TextBox(tb)))
+            }
+        }
 
         let mut section_content = vec![];
         let mut tb = TextBox::new(vec![], opts.hidpi_scale);
+
         FlowProcess::process_content(
             input,
-            &mut section_content,
+            &mut section_content.map(Positioned::new),
             opts,
             &mut tb,
-            &node.content[index..],
+            content,
             state,
         );
 
-        for elem in section_content {
-            section.elements.push(Positioned::new(elem))
-        }
+        section.elements = section_content;
+        output.push(section)
     }
 }
 
@@ -721,7 +769,7 @@ impl Process for OrderedListProcess {
     type Context<'a> = &'a mut TextBox;
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'a>,
         node: &HirNode,
@@ -765,7 +813,7 @@ impl Process for UnorderedListProcess {
     type Context<'a> = &'a mut TextBox;
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'a>,
         node: &HirNode,
@@ -802,7 +850,7 @@ impl Process for ListItemProcess {
     type Context<'a> = (&'a mut TextBox, Option<usize>);
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         (context, list_prefix): Self::Context<'a>,
         node: &HirNode,
@@ -849,7 +897,7 @@ impl Process for TableProcess {
     type Context<'a> = ();
     fn process(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'_>,
         node: &HirNode,
@@ -883,7 +931,7 @@ impl Process for TableHeadProcess {
     type Context<'a> = &'a mut Table;
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'a>,
         node: &HirNode,
@@ -913,7 +961,7 @@ impl Process for TableRowProcess {
     type Context<'a> = &'a mut Table;
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         context: Self::Context<'a>,
         node: &HirNode,
@@ -944,7 +992,7 @@ impl Process for TableCellProcess {
     type Context<'a> = (&'a mut Table, bool);
     fn process<'a>(
         input: Input,
-        output: Output,
+        output: out!(),
         opts: Opts,
         (context, header): Self::Context<'a>,
         node: &HirNode,
