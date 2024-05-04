@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     mpsc, Arc, Mutex,
@@ -110,7 +108,7 @@ impl InterpreterOpts {
         self.color_scheme = Some(color_scheme);
     }
 
-    fn finish(self, counter: AtomicCounter) -> (HtmlInterpreter, Arc<Mutex<VecDeque<Element>>>) {
+    fn finish(self, counter: AtomicCounter) -> (HtmlInterpreter, Arc<Mutex<Vec<Element>>>) {
         let Self {
             theme,
             fail_after: _,
@@ -119,7 +117,6 @@ impl InterpreterOpts {
         let element_queue = Arc::default();
         let surface_format = TextureFormat::Bgra8UnormSrgb;
         let hidpi_scale = 1.0;
-        let file_path = PathBuf::from("does_not_exist");
         let image_cache = ImageCache::default();
         let window = Arc::new(parking_lot::Mutex::new(DummyWindow(counter)));
         let interpreter = HtmlInterpreter::new_with_interactor(
@@ -127,7 +124,6 @@ impl InterpreterOpts {
             theme,
             surface_format,
             hidpi_scale,
-            file_path,
             image_cache,
             window,
             color_scheme,
@@ -167,11 +163,11 @@ impl From<ThemeDefaults> for Theme {
     }
 }
 
-fn interpret_md(text: &str) -> VecDeque<Element> {
+fn interpret_md(text: &str) -> Vec<Element> {
     interpret_md_with_opts(text, InterpreterOpts::new())
 }
 
-fn interpret_md_with_opts(text: &str, opts: InterpreterOpts) -> VecDeque<Element> {
+fn interpret_md_with_opts(text: &str, opts: InterpreterOpts) -> Vec<Element> {
     let fail_after = opts.fail_after;
 
     let counter = AtomicCounter::new();
@@ -418,7 +414,7 @@ fn horizontal_ruler_is_visible_spacer() {
     assert_eq!(num_visible_spacers, 1);
 }
 
-fn collect_list_prefixes(elems: &VecDeque<Element>) -> Vec<(&str, f32)> {
+fn collect_list_prefixes(elems: &Vec<Element>) -> Vec<(&str, f32)> {
     elems
         .iter()
         .filter_map(|elem| {
@@ -803,9 +799,9 @@ fn toml_gets_highlighted() {
     assert_ne!(highlighted_elems, plain_elems, "Highlighting should differ");
 }
 
-fn find_image(elements: &VecDeque<Element>) -> Option<&Image> {
+fn find_image(elements: &Vec<Element>) -> Option<&Image> {
     elements.iter().find_map(|element| match element {
-        crate::Element::Image(image) => Some(image),
+        Element::Image(image) => Some(image),
         _ => None,
     })
 }
