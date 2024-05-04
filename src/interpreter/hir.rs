@@ -1,24 +1,9 @@
 use crate::interpreter::html::{self, Attr, TagName};
-use crate::utils::markdown_to_html;
-use anyhow::Result;
-use anyhow::{bail, Context};
 use html5ever::{
-    buffer_queue::BufferQueue,
-    local_name,
-    tendril::{fmt, Tendril},
-    tokenizer::{Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts},
+    tokenizer::{Tag, TagKind, Token, TokenSink, TokenSinkResult},
 };
 use smart_debug::SmartDebug;
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
-use std::sync::Weak as ArcWeak;
-use std::{
-    cell::RefCell,
-    rc::{Rc, Weak},
-    str::FromStr,
-    sync::mpsc,
-};
-use syntect::highlighting::Theme;
 
 #[derive(Debug, Clone)]
 pub enum TextOrHirNode {
