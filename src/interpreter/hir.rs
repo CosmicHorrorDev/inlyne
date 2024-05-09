@@ -1,7 +1,5 @@
 use crate::interpreter::html::{self, Attr, TagName};
-use html5ever::{
-    tokenizer::{Tag, TagKind, Token, TokenSink, TokenSinkResult},
-};
+use html5ever::tokenizer::{Tag, TagKind, Token, TokenSink, TokenSinkResult};
 use smart_debug::SmartDebug;
 use std::fmt::{Display, Formatter};
 
@@ -67,7 +65,7 @@ impl Hir {
         let tag_name = match TagName::try_from(&tag.name) {
             Ok(name) => name,
             Err(name) => {
-                tracing::info!("Missing implementation for start tag: {name}");
+                tracing::info!("Missing implementation for tag: {name}");
                 return;
             }
         };
@@ -88,7 +86,6 @@ impl Hir {
         let tag_name = match TagName::try_from(&tag.name) {
             Ok(name) => name,
             Err(name) => {
-                tracing::info!("Missing implementation for end tag: {name}");
                 return;
             }
         };
