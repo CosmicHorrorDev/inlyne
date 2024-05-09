@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc, Arc,
 };
 use std::time::{Duration, Instant};
 use std::{env, thread};
@@ -18,6 +18,7 @@ use crate::{Element, ImageCache};
 
 use base64::prelude::*;
 use glyphon::FamilyOwned;
+use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
 use smart_debug::SmartDebug;
 use syntect::highlighting::Theme as SyntectTheme;
@@ -67,7 +68,7 @@ impl WindowInteractor for DummyWindow {
 struct DummyCallback(AtomicCounter);
 
 impl ImageCallback for DummyCallback {
-    fn loaded_image(&self, _: String, _: Arc<Mutex<Option<ImageData>>>) {
+    fn loaded_image(&self, _: String, _: Arc<std::sync::Mutex<Option<ImageData>>>) {
         self.0.dec();
     }
 }
@@ -188,7 +189,7 @@ fn interpret_md_with_opts(text: &str, opts: InterpreterOpts) -> Vec<Element> {
         thread::sleep(Duration::from_millis(1));
     }
 
-    let mut elements_queue = element_queue.lock().unwrap();
+    let mut elements_queue = element_queue.lock();
     std::mem::take(&mut *elements_queue)
 }
 
