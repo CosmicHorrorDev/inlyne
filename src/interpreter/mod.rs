@@ -5,7 +5,7 @@ mod html;
 mod tests;
 
 use std::str::FromStr;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 
 use crate::color::Theme;
 use crate::image::ImageData;
@@ -18,7 +18,7 @@ use crate::interpreter::ast::{Ast, AstOpts};
 use crate::interpreter::hir::Hir;
 use html5ever::tendril::*;
 use html5ever::tokenizer::{BufferQueue, Tokenizer, TokenizerOpts};
-use percent_encoding::percent_decode_str;
+use parking_lot::Mutex;
 use wgpu::TextureFormat;
 use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
@@ -44,7 +44,7 @@ impl Span {
 
 // Images are loaded in a separate thread and use a callback to indicate when they're finished
 pub trait ImageCallback {
-    fn loaded_image(&self, src: String, image_data: Arc<Mutex<Option<ImageData>>>);
+    fn loaded_image(&self, src: String, image_data: Arc<std::sync::Mutex<Option<ImageData>>>);
 }
 
 // External state from the interpreter that we want to stub out for testing
@@ -57,7 +57,7 @@ trait WindowInteractor {
 struct EventLoopCallback(EventLoopProxy<InlyneEvent>);
 
 impl ImageCallback for EventLoopCallback {
-    fn loaded_image(&self, src: String, image_data: Arc<Mutex<Option<ImageData>>>) {
+    fn loaded_image(&self, src: String, image_data: Arc<std::sync::Mutex<Option<ImageData>>>) {
         let event = InlyneEvent::LoadedImage(src, image_data);
         self.0.send_event(event).unwrap();
     }
@@ -86,8 +86,7 @@ impl WindowInteractor for LiveWindow {
 }
 
 pub struct HtmlInterpreter {
-    element_queue: Arc<Mutex<Vec<Element>>>,
-    window: Arc<parking_lot::Mutex<dyn WindowInteractor + Send>>,
+    window: Arc<Mutex<dyn WindowInteractor + Send>>,
     theme: Theme,
     ast: Ast,
 }
@@ -129,25 +128,23 @@ impl HtmlInterpreter {
         surface_format: TextureFormat,
         hidpi_scale: f32,
         image_cache: ImageCache,
-        window: Arc<parking_lot::Mutex<dyn WindowInteractor + Send>>,
+        window: Arc<Mutex<dyn WindowInteractor + Send>>,
         color_scheme: Option<ResolvedTheme>,
     ) -> Self {
-        let ast = Ast::new(AstOpts {
-            anchorizer: Default::default(),
-            theme: theme.clone(),
-            surface_format,
-            hidpi_scale,
-            image_cache,
-            window: Arc::clone(&window),
-            color_scheme,
-        });
-
-        Self {
+        let ast = Ast::new(
+            AstOpts {
+                anchorizer: Default::default(),
+                theme: theme.clone(),
+                surface_format,
+                hidpi_scale,
+                image_cache,
+                window: Arc::clone(&window),
+                color_scheme,
+            },
             element_queue,
-            theme,
-            window,
-            ast,
-        }
+        );
+
+        Self { theme, window, ast }
     }
 
     pub fn interpret_md(self, receiver: mpsc::Receiver<String>) {
@@ -175,7 +172,7 @@ impl HtmlInterpreter {
             assert!(input.is_empty());
             tok.end();
 
-            *self.element_queue.lock().unwrap() = self.ast.interpret(std::mem::take(&mut tok.sink));
+            self.ast.interpret(std::mem::take(&mut tok.sink));
             self.window.lock().finished_single_doc();
         }
     }

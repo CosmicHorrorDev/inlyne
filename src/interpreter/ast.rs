@@ -16,11 +16,8 @@ use comrak::Anchorizer;
 use glyphon::FamilyOwned;
 use parking_lot::Mutex;
 use percent_encoding::percent_decode_str;
-use std::borrow::{Borrow, Cow};
-use std::cell::{Cell, RefCell, UnsafeCell};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 use std::sync::Arc;
 use wgpu::TextureFormat;
 
@@ -55,12 +52,11 @@ impl InheritedState {
     fn set_align(&mut self, align: Option<Align>) {
         self.text_options.align = align.or(self.text_options.align);
     }
-    fn set_align_from_attributes(&mut self, attributes: Attributes) {
+    fn set_align_from_attributes(&mut self, attributes: &[Attr]) {
         self.set_align(attributes.iter().find_map(|attr| attr.to_align()));
     }
 }
 
-type Attributes<'a> = &'a [Attr];
 #[derive(Copy, Clone)]
 pub struct Input<'a>(&'a [HirNode]);
 impl<'a> Input<'a> {
@@ -154,18 +150,19 @@ impl AstOpts {
 
 pub struct Ast {
     pub opts: AstOpts,
+    pub elements: Arc<Mutex<Vec<Element>>>,
 }
 impl Ast {
-    pub fn new(opts: AstOpts) -> Self {
-        Self { opts }
+    pub fn new(opts: AstOpts, elements: Arc<Mutex<Vec<Element>>>) -> Self {
+        Self { opts, elements }
     }
-    pub fn interpret(&self, hir: Hir) -> Vec<Element> {
+    pub fn interpret(&self, hir: Hir) {
         let nodes = hir.content();
         let root = nodes.first().unwrap().content.clone();
         let state =
             InheritedState::with_span_color(self.opts.native_color(self.opts.theme.code_color));
 
-        let input = Input(&*nodes);
+        let input = Input(&nodes);
 
         let global = Static {
             opts: &self.opts,
@@ -191,8 +188,10 @@ impl Ast {
                     None
                 }
             })
-            .flatten()
-            .collect()
+            .for_each(|part| {
+                self.elements.lock().extend(part);
+                self.opts.window.lock().request_redraw();
+            })
     }
 }
 
@@ -232,9 +231,8 @@ impl<'a> State<'a> {
     }
     /// Creates Owned variant
     fn promote(&mut self) {
-        match self {
-            State::Borrowed(inner) => *self = State::Owned(inner.to_owned()),
-            _ => {}
+        if let State::Borrowed(inner) = self {
+            *self = State::Owned(inner.to_owned())
         }
     }
 }
@@ -249,16 +247,16 @@ impl Clone for State<'_> {
 
 trait Process {
     type Context<'a>;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
     );
     fn process_content<'a>(
         _global: &Static,
-        _element: Self::Context<'a>,
+        _element: Self::Context<'_>,
         _state: State,
         _input: impl IntoIterator<Item = &'a TextOrHirNode>,
         _output: &mut impl OutputStream<Output = Element>,
@@ -361,9 +359,9 @@ trait Process {
 struct FlowProcess;
 impl Process for FlowProcess {
     type Context<'a> = &'a mut TextBox;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         mut state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -388,7 +386,13 @@ impl Process for FlowProcess {
             TagName::Anchor => {
                 for attr in attributes {
                     match attr {
-                        Attr::Href(link) => state.text_options.link = Some(link.as_str().into()),
+                        Attr::Href(link) => {
+                            let link = percent_decode_str(link)
+                                .decode_utf8()
+                                .expect("Should be valid when link is Utf8")
+                                .into();
+                            state.text_options.link = Some(link);
+                        }
                         Attr::Anchor(a) => {
                             let a = percent_decode_str(a)
                                 .decode_utf8()
@@ -583,8 +587,8 @@ impl Process for FlowProcess {
 
     fn process_content<'a>(
         global: &Static,
-        element: Self::Context<'a>,
-        mut state: State,
+        element: Self::Context<'_>,
+        state: State,
         content: impl IntoIterator<Item = &'a TextOrHirNode>,
         output: &mut impl OutputStream<Output = Element>,
     ) {
@@ -608,9 +612,9 @@ impl Process for FlowProcess {
 struct DetailsProcess;
 impl Process for DetailsProcess {
     type Context<'a> = ();
-    fn process<'a>(
+    fn process(
         global: &Static,
-        _element: Self::Context<'a>,
+        _element: Self::Context<'_>,
         state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -661,9 +665,9 @@ impl Process for DetailsProcess {
 struct OrderedListProcess;
 impl Process for OrderedListProcess {
     type Context<'a> = &'a mut TextBox;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         mut state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -703,9 +707,9 @@ impl Process for OrderedListProcess {
 struct UnorderedListProcess;
 impl Process for UnorderedListProcess {
     type Context<'a> = &'a mut TextBox;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         mut state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -732,10 +736,10 @@ impl Process for UnorderedListProcess {
 struct ListItemProcess;
 impl Process for ListItemProcess {
     type Context<'a> = (&'a mut TextBox, Option<usize>);
-    fn process<'a>(
+    fn process(
         global: &Static,
-        (element, prefix): Self::Context<'a>,
-        mut state: State,
+        (element, prefix): Self::Context<'_>,
+        state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
     ) {
@@ -810,9 +814,9 @@ impl ImageProcess {
 }
 impl Process for ImageProcess {
     type Context<'a> = Option<Builder>;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        mut element: Self::Context<'a>,
+        mut element: Self::Context<'_>,
         mut state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -846,9 +850,9 @@ impl Process for ImageProcess {
 struct SourceProcess;
 impl Process for SourceProcess {
     type Context<'a> = &'a mut Builder;
-    fn process<'a>(
+    fn process(
         _global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         _state: State,
         node: &HirNode,
         _output: &mut impl OutputStream<Output = Element>,
@@ -877,9 +881,9 @@ impl Process for SourceProcess {
 struct PictureProcess;
 impl Process for PictureProcess {
     type Context<'a> = ();
-    fn process<'a>(
+    fn process(
         global: &Static,
-        _element: Self::Context<'a>,
+        _element: Self::Context<'_>,
         mut state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -918,9 +922,9 @@ impl Process for PictureProcess {
 struct TableProcess;
 impl Process for TableProcess {
     type Context<'a> = ();
-    fn process<'a>(
+    fn process(
         global: &Static,
-        _element: Self::Context<'a>,
+        _element: Self::Context<'_>,
         state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -952,9 +956,9 @@ impl Process for TableProcess {
 struct TableHeadProcess;
 impl Process for TableHeadProcess {
     type Context<'a> = &'a mut Table;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
+        element: Self::Context<'_>,
         state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
@@ -981,10 +985,10 @@ impl Process for TableHeadProcess {
 struct TableRowProcess;
 impl Process for TableRowProcess {
     type Context<'a> = &'a mut Table;
-    fn process<'a>(
+    fn process(
         global: &Static,
-        element: Self::Context<'a>,
-        mut state: State,
+        element: Self::Context<'_>,
+        state: State,
         node: &HirNode,
         output: &mut impl OutputStream<Output = Element>,
     ) {
@@ -1018,12 +1022,12 @@ struct TableCellProcess;
 impl Process for TableCellProcess {
     /// (Table, IsHeader)
     type Context<'a> = (&'a mut Table, bool);
-    fn process<'a>(
+    fn process(
         global: &Static,
-        (table, is_header): Self::Context<'a>,
+        (table, is_header): Self::Context<'_>,
         mut state: State,
         node: &HirNode,
-        output: &mut impl OutputStream<Output = Element>,
+        _output: &mut impl OutputStream<Output = Element>,
     ) {
         let row = table
             .rows
