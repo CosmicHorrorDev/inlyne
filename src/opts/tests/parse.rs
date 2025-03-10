@@ -8,8 +8,8 @@ use tempfile::NamedTempFile;
 use crate::color::{SyntaxTheme, Theme, ThemeDefaults};
 use crate::history::History;
 use crate::opts::config::{self, FontOptions, LinesToScroll};
-use crate::opts::{Cli, Opts, ResolvedTheme, ThemeType};
-use crate::test_utils::init_test_log;
+use crate::opts::{Cli, Opts, Position, ResolvedTheme, Size, ThemeType};
+use crate::test_utils::log;
 
 fn gen_args(args: Vec<&str>) -> Vec<OsString> {
     std::iter::once("inlyne")
@@ -31,8 +31,9 @@ fn temp_md_file() -> (NamedTempFile, String) {
 impl Opts {
     fn mostly_default(file_path: impl AsRef<Path>) -> Self {
         Self {
-            history: History::new(file_path.as_ref()),
+            history: History::new(file_path.as_ref()).unwrap(),
             theme: ResolvedTheme::Light.as_theme(),
+            decorations: None,
             scale: None,
             page_width: None,
             font_opts: FontOptions::default(),
@@ -57,14 +58,14 @@ impl ResolvedTheme {
 
 #[test]
 fn debug_assert() {
-    init_test_log();
+    log::init();
 
     Cli::command().debug_assert();
 }
 
 #[test]
 fn defaults() {
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -84,7 +85,7 @@ fn defaults() {
 
 #[test]
 fn config_overrides_default() {
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -155,7 +156,7 @@ fn config_overrides_default() {
 
 #[test]
 fn from_cli() {
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -203,7 +204,7 @@ fn from_cli() {
 
 #[test]
 fn cli_kitchen_sink() {
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -234,7 +235,7 @@ fn cli_kitchen_sink() {
 
 #[test]
 fn builtin_syntax_theme() {
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -271,7 +272,7 @@ fn custom_syntax_theme() {
         config
     }
 
-    init_test_log();
+    log::init();
 
     let (_tmp, md_file) = temp_md_file();
 
@@ -306,8 +307,39 @@ fn custom_syntax_theme() {
 
 #[test]
 fn missing_file_arg() {
-    init_test_log();
+    log::init();
 
     // A file arg should be required
     assert!(Cli::try_parse_from(gen_args(Vec::new())).is_err());
+}
+
+#[test]
+fn win_pos_and_size() {
+    log::init();
+
+    let (_tmp, md_file) = temp_md_file();
+
+    let args = gen_args(vec![
+        "--win-pos",
+        "100,200",
+        "--win-size",
+        "300x400",
+        &md_file,
+    ]);
+    assert_eq!(
+        Opts::parse_and_load_with_system_theme(
+            Cli::try_parse_from(args).unwrap().into_view().unwrap(),
+            config::Config::default(),
+            None,
+        )
+        .unwrap(),
+        Opts {
+            position: Some(Position { x: 100, y: 200 }),
+            size: Some(Size {
+                width: 300,
+                height: 400
+            }),
+            ..Opts::mostly_default(&md_file)
+        }
+    );
 }

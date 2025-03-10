@@ -9,13 +9,20 @@ use super::{HtmlInterpreter, ImageCallback, WindowInteractor};
 use crate::color::{Theme, ThemeDefaults};
 use crate::image::{Image, ImageData};
 use crate::opts::ResolvedTheme;
-use crate::test_utils::{init_test_log, mock_file_server, File};
+use crate::positioner::Spacer;
+use crate::test_utils::image::{Sample, SamplePng};
+use crate::test_utils::{log, server};
+use crate::text::{Text, TextBox};
 use crate::utils::Align;
 use crate::{Element, ImageCache};
 
 use base64::prelude::*;
+use glyphon::FamilyOwned;
 use parking_lot::Mutex;
+use pretty_assertions::assert_eq;
+use smart_debug::SmartDebug;
 use syntect::highlighting::Theme as SyntectTheme;
+use tiny_http::{Header, Response};
 use wgpu::TextureFormat;
 
 // We use a dummy window with an internal counter that keeps track of when rendering a single md
@@ -79,6 +86,12 @@ impl Default for InterpreterOpts {
             fail_after: Duration::from_secs(8),
             color_scheme: None,
         }
+    }
+}
+
+impl From<ThemeDefaults> for InterpreterOpts {
+    fn from(theme_default: ThemeDefaults) -> Self {
+        Self::new().theme(theme_default)
     }
 }
 
@@ -194,7 +207,7 @@ macro_rules! snapshot_interpreted_elements {
         $(
             #[test]
             fn $test_name() {
-                $crate::test_utils::init_test_log();
+                $crate::test_utils::log::init();
 
                 let text = $md_text;
                 let opts = $opts;
@@ -225,52 +238,6 @@ This sentence[^1] has two footnotes[^2]
 const CHECKLIST_HAS_NO_TEXT_PREFIX: &str = "\
 - [x] Completed task
 - [ ] Incomplete task";
-
-const CODE_BLOCK_BG_COLOR: &str = "\
-```
-Fenced code block with no language tag
-```
-
-```rust
-// Rust code
-fn main() {}
-```";
-
-const BARE_LINK_GETS_AUTOLINKED: &str = "\
-In a paragraph https://example.org
-
-- In a list https://example.org
-";
-
-const TOML_GETS_HIGHLIGHTED: &str = "\
-```toml
-key = 123
-```
-";
-
-const HANDLES_COMMA_IN_INFO_STR: &str = "\
-```rust,ignore
-let v = 1;
-```
-";
-
-const UNORDERED_LIST_IN_ORDERED: &str = "\
-1. 1st outer
-    - bullet
-2. 2nd outer
-";
-
-const NESTED_ORDERED_LIST: &str = "\
-1. 1st outer
-    1. 1st inner
-2. 2nd outer
-";
-
-const ORDERED_LIST_IN_UNORDERED: &str = "\
-- bullet
-    1. 1st inner
-- bullet
-";
 
 const PARA_IN_ORDERED_LIST: &str = "\
 1. 1st item
@@ -305,40 +272,6 @@ const ALIGNED_TABLE: &str = "\
 | text         | text        |   text   |  text | text         |
 ";
 
-const UNIQUE_ANCHORS: &str = "\
-# Foo
-# Foo
-";
-
-// TODO: this snapshot splits `Text` up a lot more than needed
-const KBD_TAG: &str = "\
-Keyboard text: <kbd>Alt-\\<num\\></kbd>
-";
-
-const BLOCKQUOTE: &str = "\
-> blockquote
-";
-
-const HORIZONTAL_RULER: &str = "\
-horizontal ruler vv
-
----
-";
-
-const SMALL_TEXT: &str = "\
-<small>small</small>
-";
-
-const TEXT_STYLES: &str = "\
-**bold**
-
-_italic_
-
-~~strikethrough~~
-
-<u>underline</u>
-";
-
 // TODO: this still has all sorts of issues (the anchor and extra whitespace)
 const HEADER_INHERIT_ALIGN: &str = r##"
 <div align="center">
@@ -364,61 +297,528 @@ collapsed text
 snapshot_interpreted_elements!(
     // (footnotes_list_prefix, FOOTNOTES_LIST_PREFIX),
     (checklist_has_no_text_prefix, CHECKLIST_HAS_NO_TEXT_PREFIX),
-    (code_block_bg_color, CODE_BLOCK_BG_COLOR),
-    (bare_link_gets_autolinked, BARE_LINK_GETS_AUTOLINKED),
-    (toml_gets_highlighted, TOML_GETS_HIGHLIGHTED),
-    (handles_comma_in_info_str, HANDLES_COMMA_IN_INFO_STR),
-    (unordered_list_in_ordered, UNORDERED_LIST_IN_ORDERED),
-    (nested_ordered_list, NESTED_ORDERED_LIST),
-    (ordered_list_in_unordered, ORDERED_LIST_IN_UNORDERED),
     (para_in_ordered_list, PARA_IN_ORDERED_LIST),
     (code_in_ordered_list, CODE_IN_ORDERED_LIST),
     (yaml_frontmatter, YAML_FRONTMATTER),
     (aligned_table, ALIGNED_TABLE),
-    (unique_anchors, UNIQUE_ANCHORS),
-    (kbd_tag, KBD_TAG),
-    (blockquote, BLOCKQUOTE),
-    (horizontal_ruler, HORIZONTAL_RULER),
-    (small_text, SMALL_TEXT),
-    (text_styles, TEXT_STYLES),
     (header_inherit_align, HEADER_INHERIT_ALIGN),
     (collapsed_section, COLLAPSED_SECTION),
 );
 
+fn elem_as_text_box(elem: &Element) -> Option<&TextBox> {
+    if let Element::TextBox(text_box) = elem {
+        Some(text_box)
+    } else {
+        None
+    }
+}
+
+const UNIQUE_ANCHORS: &str = "\
+# Foo
+# Foo
+";
+
+#[test]
+fn identical_anchors_are_unique() {
+    log::init();
+
+    let elems = interpret_md(UNIQUE_ANCHORS);
+    let anchors: Vec<_> = elems
+        .iter()
+        .filter_map(|elem| {
+            let text_box = elem_as_text_box(elem)?;
+            text_box.is_anchor.as_deref()
+        })
+        .collect();
+    insta::assert_debug_snapshot!(anchors, @r###"
+    [
+        "#foo",
+        "#foo-1",
+    ]
+    "###);
+}
+
+const BARE_LINK_GETS_AUTOLINKED: &str = "\
+In a paragraph https://example.org/in/para
+
+- In a list https://example.org/in/list
+";
+
+#[test]
+fn bare_link_gets_autolinked() {
+    log::init();
+
+    let elems = interpret_md(BARE_LINK_GETS_AUTOLINKED);
+    let links: Vec<_> = elems
+        .iter()
+        .filter_map(elem_as_text_box)
+        .flat_map(|text_box| text_box.texts.iter())
+        .filter_map(|text| text.link.as_deref())
+        .collect();
+    insta::assert_debug_snapshot!(links, @r###"
+    [
+        "https://example.org/in/para",
+        "https://example.org/in/list",
+    ]
+    "###);
+}
+
+const BLOCKQUOTE: &str = r#"
+> One level
+>
+> > Two levels
+>
+> One level
+"#;
+
+#[test]
+fn blockquote() {
+    log::init();
+
+    let elems = interpret_md(BLOCKQUOTE);
+    let quoteblock_indent_to_text: Vec<_> = elems
+        .iter()
+        .filter_map(|elem| {
+            let text_box = elem_as_text_box(elem)?;
+            let depth = text_box.is_quote_block?;
+            let text: String = text_box.texts.iter().map(|t| t.text.as_str()).collect();
+            Some((depth, text))
+        })
+        .collect();
+    insta::assert_debug_snapshot!(quoteblock_indent_to_text, @r###"
+    [
+        (
+            1,
+            "One level",
+        ),
+        (
+            2,
+            "Two levels",
+        ),
+        (
+            1,
+            "One level",
+        ),
+    ]
+    "###);
+}
+
+#[test]
+fn horizontal_ruler_is_visible_spacer() {
+    log::init();
+
+    let elems = interpret_md("---");
+    let num_visible_spacers = elems
+        .iter()
+        .filter(|elem| matches!(elem, Element::Spacer(Spacer { visible: true, .. })))
+        .count();
+    assert_eq!(num_visible_spacers, 1);
+}
+
+fn collect_list_prefixes(elems: &[Element]) -> Vec<(&str, f32)> {
+    elems
+        .iter()
+        .filter_map(|elem| {
+            let text_box = elem_as_text_box(elem)?;
+            let prefix = text_box.texts.first()?.text.as_str();
+            let indent = text_box.indent;
+            Some((prefix, indent))
+        })
+        .collect()
+}
+
+const UNORDERED_LIST_IN_ORDERED: &str = "\
+1. 1st outer
+    - bullet
+2. 2nd outer
+";
+
+#[test]
+fn unordered_list_in_ordered() {
+    log::init();
+
+    let elems = interpret_md(UNORDERED_LIST_IN_ORDERED);
+    let list_prefixes = collect_list_prefixes(&elems);
+    insta::assert_debug_snapshot!(list_prefixes, @r###"
+    [
+        (
+            "1. ",
+            50.0,
+        ),
+        (
+            "· ",
+            100.0,
+        ),
+        (
+            "2. ",
+            50.0,
+        ),
+    ]
+    "###);
+}
+
+const NESTED_ORDERED_LIST: &str = "\
+1. 1st outer
+    1. 1st inner
+2. 2nd outer
+";
+
+#[test]
+fn nested_ordered_list() {
+    log::init();
+
+    let elems = interpret_md(NESTED_ORDERED_LIST);
+    let list_prefixes = collect_list_prefixes(&elems);
+    insta::assert_debug_snapshot!(list_prefixes, @r###"
+    [
+        (
+            "1. ",
+            50.0,
+        ),
+        (
+            "1. ",
+            100.0,
+        ),
+        (
+            "2. ",
+            50.0,
+        ),
+    ]
+    "###);
+}
+
+const ORDERED_LIST_IN_UNORDERED: &str = "\
+- bullet
+    1. 1st inner
+- bullet
+";
+
+#[test]
+fn ordered_list_in_unordered() {
+    log::init();
+
+    let elems = interpret_md(ORDERED_LIST_IN_UNORDERED);
+    let list_prefixes = collect_list_prefixes(&elems);
+    insta::assert_debug_snapshot!(list_prefixes, @r###"
+    [
+        (
+            "· ",
+            50.0,
+        ),
+        (
+            "1. ",
+            100.0,
+        ),
+        (
+            "· ",
+            50.0,
+        ),
+    ]
+    "###);
+}
+
+#[test]
+fn small_text() {
+    log::init();
+
+    let md = "<small>small</small>\n\nregular";
+    let elems = interpret_md(md);
+    let mut font_box_size_it = elems
+        .iter()
+        .filter_map(|elem| elem_as_text_box(elem).map(|text_box| text_box.font_size));
+    let small_size = font_box_size_it.next().expect("Small text");
+    let regular_size = font_box_size_it.next().expect("Regular text");
+    assert_eq!(font_box_size_it.next(), None);
+    assert!(
+        small_size < regular_size,
+        "Small ({small_size}) text should be smaller than regular ({regular_size})",
+    );
+}
+
+#[derive(SmartDebug, Default, PartialEq, Eq)]
+#[debug(skip_defaults)]
+struct Styles {
+    bold: bool,
+    italic: bool,
+    striked: bool,
+    underline: bool,
+}
+
+impl From<&Text> for Styles {
+    fn from(text: &Text) -> Self {
+        Self {
+            bold: text.is_bold,
+            italic: text.is_italic,
+            striked: text.is_striked,
+            underline: text.is_underlined,
+        }
+    }
+}
+
+impl Styles {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+
+    fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    fn striked(mut self) -> Self {
+        self.striked = true;
+        self
+    }
+
+    fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+}
+
+const TEXT_STYLES: &str = "\
+**bold**
+
+_italic_
+
+~~strikethrough~~
+
+<u>underline</u>";
+
+#[test]
+fn text_styles() {
+    log::init();
+
+    let elems = interpret_md(TEXT_STYLES);
+    let styles: Vec<Styles> = elems
+        .iter()
+        .filter_map(|elem| {
+            let text_box = elem_as_text_box(elem)?;
+            let style = text_box.texts.first()?.into();
+            Some(style)
+        })
+        .collect();
+    assert_eq!(
+        styles,
+        [
+            Styles::new().bold(),
+            Styles::new().italic(),
+            Styles::new().striked(),
+            Styles::new().underline()
+        ]
+    )
+}
+
+#[test]
+fn kbd_tag_monospace() {
+    log::init();
+
+    let md = "Keyboard text: <kbd>Alt-\\<num\\></kbd>";
+    let elems = interpret_md(md);
+    let mono_text: String = elems
+        .iter()
+        .filter_map(elem_as_text_box)
+        .flat_map(|text_box| text_box.texts.iter())
+        .filter_map(|text| match text.font_family {
+            FamilyOwned::Monospace => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    insta::assert_snapshot!(&mono_text, @"Alt-<num>");
+}
+
 const UNDERLINE_IN_CODEBLOCK: &str = "\
 ```rust
 use std::io;
-```";
+```
+";
 
-const LET_IS_ITALICIZED: &str = "\
+#[test]
+fn underline_in_codeblock() {
+    log::init();
+
+    let elems = interpret_md_with_opts(UNDERLINE_IN_CODEBLOCK, ThemeDefaults::Dracula.into());
+    let underlined_code: Vec<&Text> = elems
+        .iter()
+        .filter_map(elem_as_text_box)
+        .flat_map(|text_box| text_box.texts.iter())
+        .filter(|text| text.is_underlined)
+        .collect();
+    insta::assert_debug_snapshot!(underlined_code, @r###"
+    [
+        Text {
+            text: "std",
+            font_family: Monospace,
+            color: Some(Color { r: 0.13, g: 0.69, b: 0.86 }),
+            style: UNDERLINED ,
+            ..
+        },
+        Text {
+            text: "::",
+            font_family: Monospace,
+            color: Some(Color { r: 1.00, g: 0.19, b: 0.56 }),
+            style: UNDERLINED ,
+            ..
+        },
+    ]
+    "###)
+}
+
+fn find_text_within_elem(text: &str) -> impl Fn(&Element) -> Option<&Text> + '_ {
+    move |elem| {
+        let text_box = elem_as_text_box(elem)?;
+        text_box.texts.iter().find(|t| t.text == text)
+    }
+}
+
+const ITALICS_IN_CODEBLOCK: &str = "\
 ```rust
 let foo;
-```";
+```
+";
 
-snapshot_interpreted_elements!(
-    InterpreterOpts::new().theme(ThemeDefaults::Dracula),
-    (underline_in_codeblock, UNDERLINE_IN_CODEBLOCK),
-    (let_is_italicized, LET_IS_ITALICIZED),
-);
+#[test]
+fn italics_in_codeblock() {
+    log::init();
 
-const NUM_IS_BOLD: &str = "\
+    let elems = interpret_md_with_opts(ITALICS_IN_CODEBLOCK, ThemeDefaults::Dracula.into());
+    let italicized_let = elems.iter().find_map(find_text_within_elem("let")).unwrap();
+    assert_eq!(Styles::from(italicized_let), Styles::new().italic());
+    insta::assert_debug_snapshot!(italicized_let, @r###"
+    Text {
+        text: "let",
+        font_family: Monospace,
+        color: Some(Color { r: 0.26, g: 0.81, b: 0.98 }),
+        style: ITALIC ,
+        ..
+    }
+    "###);
+}
+
+const BOLD_IN_CODEBLOCK: &str = "\
 ```ts
 3000;
+```
+";
+
+// This specific theme and code should bold the number `3000` which tests some specific parts of
+// our codeblock interpretation
+#[test]
+fn bold_in_codeblock() {
+    log::init();
+
+    let elems = interpret_md_with_opts(BOLD_IN_CODEBLOCK, ThemeDefaults::Zenburn.into());
+    let bold_3000 = elems
+        .iter()
+        .find_map(find_text_within_elem("3000"))
+        .unwrap();
+    assert_eq!(Styles::from(bold_3000), Styles::new().bold());
+    insta::assert_debug_snapshot!(bold_3000, @r###"
+    Text {
+        text: "3000",
+        font_family: Monospace,
+        color: Some(Color { r: 0.24, g: 0.67, b: 0.67 }),
+        style: BOLD ,
+        ..
+    }
+    "###);
+}
+
+const HANDLES_COMMA_IN_INFO_STR: &str = "\
+```rust,ignore
+let v = 1;
+```
+";
+
+#[test]
+fn handles_comma_in_info_str() {
+    log::init();
+
+    let regular = HANDLES_COMMA_IN_INFO_STR.replace(",ignore", "");
+    assert_ne!(
+        HANDLES_COMMA_IN_INFO_STR, regular,
+        "Should have modified the fence block tag"
+    );
+
+    let with_comma = interpret_md(HANDLES_COMMA_IN_INFO_STR);
+    let regular = interpret_md(&regular);
+    assert_eq!(
+        with_comma, regular,
+        "Should contain identically highlighted text"
+    );
+}
+
+// TODO: Add a test that verifies the background color is the same for both text boxes
+const CODE_BLOCK_BG_COLOR: &str = "\
+```
+Fenced code block with no language tag
+```
+
+```rust
+// Rust code
+fn main() {}
 ```";
 
-snapshot_interpreted_elements!(
-    InterpreterOpts::new().theme(ThemeDefaults::Zenburn),
-    (num_is_bold, NUM_IS_BOLD),
-);
+#[test]
+fn code_block_bg_color() {
+    log::init();
+
+    let elems = interpret_md(CODE_BLOCK_BG_COLOR);
+    let codeblock_bg: Vec<_> = elems
+        .iter()
+        .filter_map(|elem| {
+            let text_box = elem_as_text_box(elem)?;
+            text_box.background_color
+        })
+        .collect();
+
+    match codeblock_bg.as_slice() {
+        &[plain_bg, rust_bg] => assert_eq!(plain_bg, rust_bg),
+        unexpected => panic!("Expected 2 codeblocks. Found: {}", unexpected.len()),
+    }
+}
+
+const TOML_GETS_HIGHLIGHTED: &str = "\
+```toml
+key = 123
+```
+";
+
+#[test]
+fn toml_gets_highlighted() {
+    log::init();
+
+    let without_tag = TOML_GETS_HIGHLIGHTED.replace("toml", "");
+    assert_ne!(TOML_GETS_HIGHLIGHTED, without_tag, "TOML tag is removed");
+    let highlighted_elems = interpret_md(TOML_GETS_HIGHLIGHTED);
+    let plain_elems = interpret_md(&without_tag);
+    assert_ne!(highlighted_elems, plain_elems, "Highlighting should differ");
+}
+
+fn find_image(elements: &[Element]) -> Option<&Image> {
+    elements.iter().find_map(|element| match element {
+        crate::Element::Image(image) => Some(image),
+        _ => None,
+    })
+}
 
 #[test]
 fn centered_image_with_size_align_and_link() {
-    init_test_log();
+    log::init();
 
-    let logo = include_bytes!("../../assets/test_data/bun_logo.png");
+    let logo: Sample = SamplePng::Bun.into();
     let logo_path = "/bun_logo.png";
-    let files = vec![File::new(logo_path, "image/png", logo)];
-    let (_server, server_url) = mock_file_server(files);
+    let files = vec![server::File::new(
+        logo_path,
+        logo.content_type(),
+        &logo.pre_decode(),
+    )];
+    let (_server, server_url) = server::mock_file_server(files);
     let logo_url = server_url + logo_path;
 
     let text = format!(
@@ -428,22 +828,37 @@ fn centered_image_with_size_align_and_link() {
 </p>"#,
     );
 
-    insta::with_settings!({
-        // The port for the URL here is non-deterministic, but the description changing doesn't
-        // invalidate the snapshot, so that's okay
-        description => &text,
-    }, {
-        insta::assert_debug_snapshot!(interpret_md(&text));
-    });
+    let elems = interpret_md(&text);
+    let image = find_image(&elems).unwrap();
+    insta::assert_debug_snapshot!(image, @r###"
+    Image {
+        image_data: Mutex {
+            data: Some(
+                ImageData {
+                    lz4_blob: { len: 21244, data: [4, 34, 77, ..] },
+                    scale: true,
+                    dimensions: (396, 347),
+                },
+            ),
+            poisoned: false,
+            ..
+        },
+        is_aligned: Some(Center),
+        size: Some(PxHeight(Px(170))),
+        is_link: Some("https://bun.sh"),
+        ..
+    }
+    "###);
 }
 
+// TODO: change this to test against the image cache so that we can inspect the error?
 #[test]
 fn image_loading_fails_gracefully() {
-    init_test_log();
+    log::init();
 
     let json = r#"{"im": "not an image"}"#;
     let json_path = "/snapshot.png";
-    let (_server, server_url) = mock_file_server(vec![File::new(
+    let (_server, server_url) = server::mock_file_server(vec![server::File::new(
         json_path,
         "application/json",
         json.as_bytes(),
@@ -456,9 +871,9 @@ fn image_loading_fails_gracefully() {
     // not sure why. Bump up the timeout delay to reduce the amount of spurious failures in as
     // tight of a niche as we can specify
     let mut opts = InterpreterOpts::new();
-    if env::var("CI").map_or(false, |var| ["true", "1"].contains(&&*var.to_lowercase()))
-        && cfg!(target_os = "windows")
-    {
+    let is_ci = env::var("CI").map_or(false, |var| ["true", "1"].contains(&&*var.to_lowercase()));
+    let is_windows = cfg!(target_os = "windows");
+    if is_ci && is_windows {
         opts.fail_after *= 2;
     }
 
@@ -474,18 +889,11 @@ fn image_loading_fails_gracefully() {
 // Check to see that each paths are used for their respective color-schemes
 #[test]
 fn picture_dark_light() {
-    fn find_image(elements: &Vec<Element>) -> Option<&Image> {
-        elements.iter().find_map(|element| match element {
-            Element::Image(image) => Some(image),
-            _ => None,
-        })
-    }
-
     const B64_SINGLE_PIXEL_WEBP_000: &[u8] = b"UklGRhoAAABXRUJQVlA4TA4AAAAvAAAAAM1VICICEREJAA==";
     const B64_SINGLE_PIXEL_WEBP_999: &[u8] = b"UklGRhoAAABXRUJQVlA4TA4AAAAvAAAAAM1VICICzYyIBA==";
     const B64_SINGLE_PIXEL_WEBP_FFF: &[u8] = b"UklGRhoAAABXRUJQVlA4TA4AAAAvAAAAAM1VICIC/Y+IBA==";
 
-    init_test_log();
+    log::init();
 
     let light_path = "/light.webp";
     let dark_path = "/dark.webp";
@@ -499,10 +907,10 @@ fn picture_dark_light() {
     .into_iter()
     .map(|(path, b64_bytes)| {
         let bytes = BASE64_STANDARD.decode(b64_bytes).unwrap();
-        File::new(path, webp_mime, &bytes)
+        server::File::new(path, webp_mime, &bytes)
     })
     .collect();
-    let (_server, server_url) = mock_file_server(files);
+    let (_server, server_url) = server::mock_file_server(files);
     let dark_url = format!("{server_url}{dark_path}");
     let light_url = format!("{server_url}{light_path}");
     let default_url = format!("{server_url}{default_path}");
@@ -549,4 +957,34 @@ fn picture_dark_light() {
             "Failed for color scheme: {color_scheme:?}"
         );
     }
+}
+
+#[test]
+fn custom_user_agent() {
+    log::init();
+
+    let (send_ua, recv_ua) = mpsc::channel();
+    let state = server::State::new().send(send_ua);
+    let send_ua_server = server::spawn(state, |state, req, _req_url| {
+        let maybe_ua = req.headers().iter().find_map(|Header { field, value }| {
+            field.equiv("user-agent").then(|| value.as_str().to_owned())
+        });
+        let _ = state
+            .send
+            .as_ref()
+            .unwrap()
+            .send(server::FromServer::UserAgent(maybe_ua));
+        let sample_body = Sample::Png(SamplePng::Bun).pre_decode();
+        Response::from_data(sample_body).boxed()
+    });
+    let server_url = send_ua_server.url();
+
+    let text = format!(r"![Show me the UA]({server_url})");
+    let _ = interpret_md(&text);
+
+    // TODO: why is this wrapped in an `Option<_>`?
+    let server::FromServer::UserAgent(Some(user_agent)) = recv_ua.recv().unwrap() else {
+        panic!();
+    };
+    insta::assert_snapshot!(user_agent, @"inlyne 0.5.0 https://github.com/Inlyne-Project/inlyne");
 }

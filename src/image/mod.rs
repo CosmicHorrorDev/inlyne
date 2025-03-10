@@ -5,7 +5,7 @@ mod tests;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use std::{
     fs,
@@ -21,11 +21,9 @@ use crate::utils::{usize_in_mib, Align, Point, Size};
 use anyhow::Context;
 use bytemuck::{Pod, Zeroable};
 use image::{ImageBuffer, RgbaImage};
-use resvg::{
-    tiny_skia,
-    usvg::{self, TreeParsing, TreeTextToPath},
-};
+use resvg::{tiny_skia, usvg};
 use smart_debug::SmartDebug;
+use usvg::fontdb;
 use wgpu::util::DeviceExt;
 use wgpu::{BindGroup, Device, TextureFormat};
 
@@ -47,7 +45,7 @@ impl From<u32> for Px {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ImageSize {
     PxWidth(Px),
     PxHeight(Px),
@@ -63,7 +61,7 @@ impl ImageSize {
     }
 }
 
-#[derive(SmartDebug, Default, Clone)]
+#[derive(SmartDebug, Default, Clone, PartialEq)]
 pub struct ImageData {
     #[debug(wrapper = DebugBytesPrefix)]
     lz4_blob: Vec<u8>,
@@ -73,7 +71,7 @@ pub struct ImageData {
 }
 
 impl ImageData {
-    fn load(bytes: &[u8], scale: bool) -> anyhow::Result<Self> {
+    pub fn load(bytes: &[u8], scale: bool) -> anyhow::Result<Self> {
         let (lz4_blob, dimensions) = decode::decode_and_compress(bytes)?;
         Ok(Self {
             lz4_blob,
@@ -115,6 +113,8 @@ impl ImageData {
 
 #[derive(SmartDebug, Default)]
 pub struct Image {
+    // TODO: Instead of sharing a mutex with the image loading thread change this to hold a oneshot
+    // channel that stores the image?
     #[debug(skip_fn = debug_ignore_image_data)]
     pub image_data: Arc<Mutex<Option<ImageData>>>,
     #[debug(skip_fn = Option::is_none, wrapper = DebugInline)]
@@ -127,6 +127,49 @@ pub struct Image {
     pub is_link: Option<String>,
     #[debug(skip)]
     pub hidpi_scale: f32,
+}
+
+// NOTE: Internally performs some expensive operations. Avoid calling often
+// TODO: can we deprecate this and then `allow` specific usages of it due to ^^?
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            image_data,
+            is_aligned,
+            size,
+            bind_group,
+            is_link,
+            hidpi_scale,
+        } = self;
+        let Self {
+            image_data: other_image_data,
+            is_aligned: other_is_aligned,
+            size: other_size,
+            bind_group: other_bind_group,
+            is_link: other_is_link,
+            hidpi_scale: other_hidpi_scale,
+        } = other;
+
+        let clone_image_data = |shared_image: &Mutex<Option<_>>| {
+            shared_image
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .to_owned()
+        };
+        let image_data = clone_image_data(image_data);
+        let other_image_data = clone_image_data(other_image_data);
+
+        let some_bind_group = bind_group.is_some();
+        let some_other_bind_group = other_bind_group.is_some();
+        let bind_group_variant_matches = some_bind_group ^ !some_other_bind_group;
+
+        image_data == other_image_data
+            && is_aligned == other_is_aligned
+            && size == other_size
+            && is_link == other_is_link
+            && hidpi_scale == other_hidpi_scale
+            && bind_group_variant_matches
+    }
 }
 
 fn debug_ignore_image_data(mutex: &Mutex<Option<ImageData>>) -> bool {
@@ -245,8 +288,6 @@ impl Image {
                 image
             } else {
                 let opt = usvg::Options::default();
-                let mut fontdb = usvg::fontdb::Database::new();
-                fontdb.load_system_fonts();
                 // TODO: yes all of this image loading is very messy and could use a refactor
                 let Ok(mut tree) = usvg::Tree::from_data(&image_data, &opt) else {
                     tracing::warn!(
@@ -268,13 +309,18 @@ impl Image {
                     )
                     .unwrap(),
                 );
-                tree.convert_text(&fontdb);
-                let rtree = resvg::Tree::from_usvg(&tree);
+                static FONTDB: OnceLock<fontdb::Database> = OnceLock::new();
+                let fontdb = FONTDB.get_or_init(|| {
+                    let mut db = fontdb::Database::new();
+                    db.load_system_fonts();
+                    db
+                });
+                tree.postprocess(Default::default(), fontdb);
                 let mut pixmap =
-                    tiny_skia::Pixmap::new(rtree.size.width() as u32, rtree.size.height() as u32)
+                    tiny_skia::Pixmap::new(tree.size.width() as u32, tree.size.height() as u32)
                         .context("Couldn't create svg pixmap")
                         .unwrap();
-                rtree.render(tiny_skia::Transform::default(), &mut pixmap.as_mut());
+                resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
                 ImageData::new(
                     ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.data().into())
                         .context("Svg buffer has invalid dimensions")
@@ -384,7 +430,7 @@ pub fn http_get_image(url: &str) -> anyhow::Result<Vec<u8>> {
     const USER_AGENT: &str = concat!(
         "inlyne ",
         env!("CARGO_PKG_VERSION"),
-        " https://github.com/trimental/inlyne"
+        " https://github.com/Inlyne-Project/inlyne"
     );
 
     const LIMIT: usize = 20 * 1_024 * 1_024;

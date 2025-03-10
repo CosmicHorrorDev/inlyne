@@ -59,6 +59,7 @@ pub struct Opts {
     pub history: History,
     #[debug(skip)]
     pub theme: color::Theme,
+    pub decorations: Option<bool>,
     pub scale: Option<f32>,
     pub page_width: Option<f32>,
     pub lines_to_scroll: f32,
@@ -101,6 +102,7 @@ impl Opts {
     ) -> Result<Self> {
         let Config {
             theme: config_theme,
+            decorations: config_decorations,
             scale: config_scale,
             page_width: config_page_width,
             lines_to_scroll,
@@ -115,6 +117,7 @@ impl Opts {
         let View {
             file_path,
             theme: args_theme,
+            decorations,
             scale: args_scale,
             config: _,
             page_width: args_page_width,
@@ -129,6 +132,7 @@ impl Opts {
 
         set_render_element_bounds(render_element_bounds);
 
+        let history = History::new(&file_path)?;
         let resolved_theme = args_theme
             .or(config_theme)
             .and_then(ResolvedTheme::new)
@@ -145,6 +149,7 @@ impl Opts {
             }
         };
 
+        let decorations = decorations.or(config_decorations);
         let scale = args_scale.or(config_scale);
         let font_opts = font_options.unwrap_or_default();
         let page_width = args_page_width.or(config_page_width);
@@ -157,8 +162,9 @@ impl Opts {
         };
 
         Ok(Self {
-            history: History::new(&file_path),
+            history,
             theme,
+            decorations,
             scale,
             page_width,
             lines_to_scroll,

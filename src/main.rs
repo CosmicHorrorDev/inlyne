@@ -35,7 +35,6 @@ use std::fmt::Debug;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::str::FromStr;
 use std::sync::mpsc::{self, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -87,7 +86,7 @@ pub enum Hoverable<'a> {
     Summary(&'a Section),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Element {
     TextBox(TextBox),
     Spacer(Spacer),
@@ -162,11 +161,19 @@ impl Inlyne {
         let window = {
             let mut wb = WindowBuilder::new().with_title(utils::format_title(&file_path));
 
+            if let Some(decorations) = opts.decorations {
+                wb = wb.with_decorations(decorations);
+            }
             if let Some(ref pos) = opts.position {
-                wb = wb.with_position(winit::dpi::PhysicalPosition::new(pos.x, pos.y))
+                wb = wb.with_position(winit::dpi::PhysicalPosition::new(pos.x, pos.y));
             }
             if let Some(ref size) = opts.size {
-                wb = wb.with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height))
+                wb = wb.with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+            }
+            #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
+            {
+                use winit::platform::wayland::WindowBuilderExtWayland;
+                wb = wb.with_name("inlyne", "");
             }
 
             Arc::new(wb.build(&event_loop).unwrap())
@@ -448,19 +455,23 @@ impl Inlyne {
                                 match hoverable {
                                     Hoverable::Image(Image { is_link: Some(link), .. }) |
                                     Hoverable::Text(Text { link: Some(link), .. }) => {
-                                        let path = PathBuf::from_str(link).unwrap(); // Can't fail
+                                        let path = PathBuf::from(link);
 
-                                        if  path.extension().map_or(false, |ext| ext == "md")
-                                            && !path.to_str().map_or(false, |s| s.starts_with("http")) {
+                                        if  path.extension().is_some_and(|ext| ext == "md")
+                                            && !path.to_str().is_some_and(|s| s.starts_with("http")) {
                                             // Open them in a new window, akin to what a browser does
                                             if modifiers.shift() {
-                                                Command::new(
-                                                    std::env::current_exe()
-                                                        .unwrap_or_else(|_| "inlyne".into()),
-                                                )
-                                                    .args(Opts::program_args(&path))
-                                                    .spawn()
-                                                    .expect("Could not spawn new inlyne instance");
+                                                std::thread::spawn(move || {
+                                                    Command::new(
+                                                        std::env::current_exe()
+                                                            .unwrap_or_else(|_| "inlyne".into()),
+                                                    )
+                                                        .args(Opts::program_args(&path))
+                                                        .spawn()
+                                                        .expect("Couldn't spawn inlyne instance")
+                                                        .wait()
+                                                        .expect("Failed waiting on child");
+                                                });
                                             } else {
                                                 match read_to_string(&path) {
                                                     Ok(contents) => {
@@ -501,6 +512,7 @@ impl Inlyne {
                                 };
                             } else {
                                 self.selection.add_position(mouse_position);
+                                self.window.request_redraw()
                             }
                             mouse_down = true;
                         }
@@ -609,7 +621,7 @@ impl Inlyne {
                 Event::MainEventsCleared => {
                     // We lazily store the size and only reposition elements and request a redraw when
                     // we receive a `MainEventsCleared`.  This prevents us from clogging up the queue
-                    // with a bunch of costly resizes. (https://github.com/trimental/inlyne/issues/25)
+                    // with a bunch of costly resizes. (https://github.com/Inlyne-Project/inlyne/issues/25)
                     if let Some(size) = pending_resize.take() {
                         if size.width > 0 && size.height > 0 {
                             self.renderer.config.width = size.width;
@@ -783,15 +795,20 @@ fn main() -> anyhow::Result<()> {
                 .join("inlyne")
                 .join("inlyne.toml");
 
-            if !config_path.is_file() {
-                tracing::warn!(
-                    "No config found. Creating a new config at: {}",
-                    config_path.display()
-                );
-                Config::create_default_config(&config_path)?;
-            }
+            let config = std::fs::read_to_string(&config_path)
+                .unwrap_or_else(|_| Config::default_config().to_string());
 
-            edit::edit_file(config_path)?;
+            let new_config = edit::edit_with_builder(
+                &config,
+                edit::Builder::new()
+                    .prefix("inlyne_temp")
+                    .suffix(".toml")
+                    .keep(true),
+            )?;
+
+            _ = Config::load_from_str(&new_config)?;
+
+            std::fs::write(config_path, new_config)?;
         }
     }
 

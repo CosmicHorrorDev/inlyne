@@ -99,6 +99,7 @@ pub struct Window {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     pub theme: Option<ThemeType>,
+    pub decorations: Option<bool>,
     pub scale: Option<f32>,
     pub page_width: Option<f32>,
     pub lines_to_scroll: LinesToScroll,
@@ -145,8 +146,12 @@ impl Config {
         )?;
 
         let mut file = std::fs::File::create(path)?;
-        file.write_all(include_bytes!("../../inlyne.default.toml"))?;
+        file.write_all(Self::default_config().as_bytes())?;
         Ok(())
+    }
+
+    pub const fn default_config() -> &'static str {
+        include_str!("../../inlyne.default.toml")
     }
 }
 

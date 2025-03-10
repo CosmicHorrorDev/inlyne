@@ -10,29 +10,30 @@ use std::{
     fmt::Write,
     hash::Hasher,
     io,
-    panic::PanicInfo,
+    panic::PanicHookInfo,
     path::{Path, PathBuf},
 };
 
-use human_panic::{report::Method, Metadata};
+use human_panic::report::Method;
 use serde::Deserialize;
+
+const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[macro_export]
 macro_rules! setup_panic {
     () => {
         match ::human_panic::PanicStyle::default() {
-            ::human_panic::PanicStyle::Debug => {}
             ::human_panic::PanicStyle::Human => {
-                let meta = ::human_panic::metadata!();
-
                 ::std::panic::set_hook(::std::boxed::Box::new(
-                    move |info: &::std::panic::PanicInfo| {
+                    move |info: &::std::panic::PanicHookInfo| {
                         eprintln!("{info}");
-                        let file_path = $crate::panic_hook::handle_dump(&meta, info);
-                        $crate::panic_hook::print_msg(file_path.as_deref(), &meta).unwrap();
+                        let file_path = $crate::panic_hook::handle_dump(info);
+                        $crate::panic_hook::print_msg(file_path.as_deref()).unwrap();
                     },
                 ));
             }
+            _ => {}
         }
     };
 }
@@ -48,8 +49,8 @@ struct Report {
 }
 
 impl Report {
-    fn new(name: &str, version: &str, method: Method, explanation: String, cause: String) -> Self {
-        human_panic::report::Report::new(name, version, method, explanation, cause).into()
+    fn new(method: Method, explanation: String, cause: String) -> Self {
+        human_panic::report::Report::new(PKG_NAME, PKG_VERSION, method, explanation, cause).into()
     }
 
     fn serialize(&self) -> Option<String> {
@@ -121,7 +122,7 @@ impl From<human_panic::report::Report> for Report {
     }
 }
 
-pub fn handle_dump(meta: &Metadata, panic_info: &PanicInfo) -> Option<PathBuf> {
+pub fn handle_dump(panic_info: &PanicHookInfo) -> Option<PathBuf> {
     let mut expl = String::new();
 
     let message = match (
@@ -147,7 +148,7 @@ pub fn handle_dump(meta: &Metadata, panic_info: &PanicInfo) -> Option<PathBuf> {
         None => expl.push_str("Panic location unknown.\n"),
     }
 
-    let report = Report::new(&meta.name, &meta.version, Method::Panic, expl, cause);
+    let report = Report::new(Method::Panic, expl, cause);
     let maybe = report.persist();
     if maybe.is_none() {
         eprintln!("{}", report.serialize().unwrap());
@@ -156,21 +157,20 @@ pub fn handle_dump(meta: &Metadata, panic_info: &PanicInfo) -> Option<PathBuf> {
     maybe
 }
 
-pub fn print_msg(file_path: Option<&Path>, meta: &Metadata) -> Option<()> {
+pub fn print_msg(file_path: Option<&Path>) -> Option<()> {
     use io::Write as _;
 
     let stderr = anstream::stderr();
     let mut stderr = stderr.lock();
 
     write!(stderr, "{}", anstyle::AnsiColor::Red.render_fg()).ok()?;
-    write_msg(&mut stderr, file_path, meta)?;
+    write_msg(&mut stderr, file_path)?;
     write!(stderr, "{}", anstyle::Reset.render()).ok()?;
 
     Some(())
 }
 
-fn write_msg(buffer: &mut impl io::Write, file_path: Option<&Path>, meta: &Metadata) -> Option<()> {
-    let name = &meta.name;
+fn write_msg(buffer: &mut impl io::Write, file_path: Option<&Path>) -> Option<()> {
     let report_path = match file_path {
         Some(fp) => format!("{}", fp.display()),
         None => "<Failed to store file to disk>".to_string(),
@@ -181,7 +181,7 @@ fn write_msg(buffer: &mut impl io::Write, file_path: Option<&Path>, meta: &Metad
         "\
 Well, this is embarrassing.
 
-{name} had a problem and crashed. To help us diagnose the problem you can send us a crash report.
+{PKG_NAME} had a problem and crashed. To help us diagnose the problem you can send us a crash report.
 We have generated a report file at \"{report_path}\". You can search
 for issues with similar explanations at the following url:
 
@@ -200,4 +200,54 @@ Thank you kindly!"
     .ok()?;
 
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use human_panic::report::Method;
+
+    #[test]
+    fn snap_report() {
+        let mut report = Report::new(
+            Method::Panic,
+            "dummy explanation".into(),
+            "dummy cause".into(),
+        );
+        // Normalize some unstable values
+        report.backtrace = "\n[REDACTED: backtrace lines]".into();
+        report.operating_system = "[REDACTED]".into();
+        let report_path = report.persist().unwrap();
+
+        let contents = std::fs::read_to_string(&report_path).unwrap();
+        insta::assert_snapshot!(contents, @r"
+        # Crash Report
+
+        | Name | `inlyne` |
+        | ---: | :--- |
+        | Version | `0.5.0` |
+        | Operating System | [REDACTED] |
+
+        `````text
+        Cause: dummy cause
+
+        Explanation:
+        dummy explanation
+        `````
+
+        <details>
+        <summary>(backtrace)</summary>
+
+        `````text
+        [REDACTED: backtrace lines]
+        `````
+
+        </details>
+
+        ---
+
+        <!-- Add any relevant info below vv -->
+        ");
+    }
 }

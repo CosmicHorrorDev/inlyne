@@ -18,7 +18,7 @@ pub struct TableLayout {
     pub size: Size,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq)]
 pub struct Table {
     pub rows: Vec<Vec<TextBox>>,
 }

@@ -15,6 +15,7 @@ use crate::Element;
 use comrak::Anchorizer;
 use glyphon::FamilyOwned;
 use parking_lot::Mutex;
+use percent_encoding::percent_decode_str;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -395,8 +396,20 @@ impl Process for FlowProcess {
             TagName::Anchor => {
                 for attr in attributes {
                     match attr {
-                        Attr::Href(link) => state.text_options.link = Some(link.as_str().into()),
-                        Attr::Anchor(a) => element.set_anchor(a.to_owned()),
+                        Attr::Href(link) => {
+                            let link = percent_decode_str(link)
+                                .decode_utf8()
+                                .expect("Should be valid when link is Utf8")
+                                .into();
+                            state.text_options.link = Some(link);
+                        }
+                        Attr::Anchor(a) => {
+                            let a = percent_decode_str(a)
+                                .decode_utf8()
+                                .expect("Should be valid when link is Utf8")
+                                .into_owned();
+                            element.set_anchor(a.to_owned());
+                        }
                         _ => {}
                     }
                 }
