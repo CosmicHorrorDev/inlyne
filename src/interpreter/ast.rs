@@ -214,7 +214,7 @@ enum State<'a> {
     Owned(InheritedState),
     Borrowed(&'a InheritedState),
 }
-impl<'a> Deref for State<'a> {
+impl Deref for State<'_> {
     type Target = InheritedState;
     fn deref(&self) -> &Self::Target {
         match self {
@@ -223,7 +223,7 @@ impl<'a> Deref for State<'a> {
         }
     }
 }
-impl<'a> DerefMut for State<'a> {
+impl DerefMut for State<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.promote();
         match self {
@@ -246,7 +246,7 @@ impl<'a> State<'a> {
         }
     }
 }
-impl<'a> Clone for State<'a> {
+impl Clone for State<'_> {
     fn clone(&self) -> Self {
         match self {
             State::Owned(inner) => State::Owned(inner.clone()),
