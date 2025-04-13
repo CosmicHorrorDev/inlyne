@@ -422,7 +422,7 @@ fn horizontal_ruler_is_visible_spacer() {
     assert_eq!(num_visible_spacers, 1);
 }
 
-fn collect_list_prefixes(elems: &Vec<Element>) -> Vec<(&str, f32)> {
+fn collect_list_prefixes(elems: &[Element]) -> Vec<(&str, f32)> {
     elems
         .iter()
         .filter_map(|elem| {
@@ -807,7 +807,7 @@ fn toml_gets_highlighted() {
     assert_ne!(highlighted_elems, plain_elems, "Highlighting should differ");
 }
 
-fn find_image(elements: &Vec<Element>) -> Option<&Image> {
+fn find_image(elements: &[Element]) -> Option<&Image> {
     elements.iter().find_map(|element| match element {
         Element::Image(image) => Some(image),
         _ => None,
